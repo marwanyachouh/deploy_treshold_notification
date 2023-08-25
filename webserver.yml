@@ -10,10 +10,6 @@
     db_pass: passwordtest123
 
   tasks:
-    - name: Set timezone to Stockholm
-      timezone:
-        name: Europe/Stockholm
-
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: true
