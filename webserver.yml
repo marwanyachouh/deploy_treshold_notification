@@ -1,0 +1,184 @@
+---
+- name: Set up web server with Flask application
+  hosts: webservers
+  become: true
+  vars:
+    ansible_ssh_private_key_file: /Users/marwan/marwutil/.vagrant/machines/webserver/virtualbox/private_key
+    db_host: 192.168.56.121
+    db_name: mytest_db
+    db_user: test_user
+    db_pass: passwordtest123
+
+  tasks:
+    - name: Set timezone to Stockholm
+      timezone:
+        name: Europe/Stockholm
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install required packages
+      apt:
+        name:
+          - python3-pip
+          - libpq-dev
+        state: present
+
+    - name: Ensure pip3 is up-to-date
+      pip:
+        name: pip
+        state: latest
+        executable: pip3
+
+    - name: Ensure setuptools_rust is installed using pip
+      pip:
+        name: setuptools_rust
+        state: present
+        executable: pip3
+
+    - name: Install Flask and psycopg2
+      pip:
+        name:
+          - Flask
+          - psycopg2
+        executable: pip3
+
+    - name: Create the Flask app
+      copy:
+        dest: /home/vagrant/app.py
+        content: |
+          from flask import Flask
+          import psycopg2
+          import datetime
+
+          app = Flask(__name__)
+
+          @app.route('/')
+          def get_prices():
+              try:
+                  conn = psycopg2.connect(dbname='{{ db_name }}', user='{{ db_user }}', password='{{ db_pass }}', host='{{ db_host }}')
+                  cursor = conn.cursor()
+
+                  # Get the price history
+                  cursor.execute("SELECT price, time FROM bitcoinprices ORDER BY time DESC")
+                  results = cursor.fetchall()
+                  conn.close()
+
+                  response = '<h1>Price History</h1>'
+                  response += '<table><tr><th>Price</th><th>Time</th></tr>'
+                  for row in results:
+                      response += f'<tr><td>{row[0]}</td><td>{row[1]}</td></tr>'
+                  response += '</table>'
+
+                  return response
+              except Exception as e:
+                  return f'Failed to connect to the database. Error: {e}'
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0')
+
+    - name: Create the Flask app systemd service file
+      copy:
+        dest: /etc/systemd/system/flaskapp.service
+        content: |
+          [Unit]
+          Description=Flask app
+          After=network.target
+
+          [Service]
+          User=vagrant
+          WorkingDirectory=/home/vagrant
+          ExecStart=/usr/bin/python3 /home/vagrant/app.py
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd
+      command: systemctl daemon-reload
+
+    - name: Enable Flask app service
+      systemd:
+        name: flaskapp.service
+        enabled: yes
+
+    - name: Start Flask app service
+      systemd:
+        name: flaskapp.service
+        state: started
+
+    - name: Wait for Flask app to start
+      ansible.builtin.wait_for:
+        host: 192.168.56.120
+        port: 5000
+        delay: 5 # Wait for 5 seconds before starting to poll
+        timeout: 30 # Fail if not responsive after 30 seconds
+
+    - name: Install Ansible
+      apt:
+        name:
+          - ansible
+        state: present
+
+    - name: Upgrade Ansible to a version compatible with Ansible Galaxy (2.9+)
+      pip:
+        name: ansible
+        state: latest
+        executable: pip3
+
+    - name: Install the community.postgresql collection
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection install community.postgresql
+
+    - name: Install PostgreSQL client
+      apt:
+        name:
+          - postgresql-client
+        state: present
+
+    - name: Copy crypto_tasks.yml to the web server
+      copy:
+        src: "/Users/marwan/marwutil/localrepo/webdb/crypto_tasks.yml"
+        dest: "/home/vagrant/crypto_tasks.yml"
+
+    - name: Create script to run crypto_tasks playbook
+      copy:
+        dest: "/home/vagrant/run_crypto_tasks.sh"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+
+          # Print environment variables
+          env > /home/vagrant/env_output.txt
+
+          # Set up the environment
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+          export LANG=C.UTF-8
+          export ANSIBLE_COLLECTIONS_PATHS=/home/vagrant/.ansible/collections:/usr/share/ansible/collections
+
+          # Navigate to the playbook directory
+          cd /home/vagrant
+
+          # Run the playbook with vault password from a file
+          /bin/bash -l -c "ansible-playbook crypto_tasks.yml --vault-password-file vault_password.txt"
+          
+
+
+    - name: Change ownership of the run_crypto_tasks.sh script
+      file:
+        path: /home/vagrant/run_crypto_tasks.sh
+        owner: vagrant
+        group: vagrant
+        mode: '0755'
+
+    - name: Schedule price check using script
+      cron:
+        name: "Check cryptocurrency price"
+        user: "vagrant"
+        minute: "*/5" # Every 1 minute for testing
+        job: "/home/vagrant/run_crypto_tasks.sh > /home/vagrant/crypto_tasks.log 2>&1"
+
+    - name: Print the URL of the web page
+      debug:
+        msg: "The web page is available at http://{{ ansible_host }}:5000/"

@@ -1,0 +1,46 @@
+---
+- name: Fetch and store crypto data
+  hosts: localhost
+  vars:
+    db_host: 192.168.56.121
+    db_name: mytest_db
+    db_user: test_user
+    db_pass: passwordtest123
+
+  tasks:
+    - name: Fetch crypto price from CoinGecko API
+      uri:
+        url: 'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd'
+        method: GET
+        return_content: true
+      register: price_response
+
+    - name: Insert crypto price into the database
+      community.postgresql.postgresql_query:
+        db: "{{ db_name }}"
+        login_user: "{{ db_user }}"
+        login_password: "{{ db_pass }}"
+        login_host: "{{ db_host }}"
+        query: "INSERT INTO bitcoinprices (price, time) VALUES ({{ price_response.json.bitcoin.usd }}, NOW())"
+
+    - name: Compare BTC price with threshold
+      set_fact:
+        btc_below_threshold: "{{ price_response.json.bitcoin.usd | float < 25000 }}"
+
+    - name: Load vault variables
+      include_vars:
+        file: "/home/vagrant/vault-mail.yml"
+        name: vault
+      when: btc_below_threshold
+
+    - name: Send an email when the BTC price is below the threshold
+      mail:
+        host: smtp.gmail.com
+        port: 587
+        username: marwan.yachouh@gmail.com
+        password: "{{ vault.gmail_password }}"
+        to: marwan.yachouh@gmail.com
+        subject: "BTC Price Alert"
+        body: "The BTC price is below the $25000 threshold: ${{ price_response.json.bitcoin.usd }}"
+      when: btc_below_threshold
+      delegate_to: localhost

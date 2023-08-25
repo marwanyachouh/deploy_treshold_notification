@@ -1,0 +1,116 @@
+---
+- name: Set up PostgreSQL server
+  hosts: dbservers
+  become: true
+  vars:
+    db_name: mytest_db
+    db_user: test_user
+    db_pass: passwordtest123
+
+  tasks:
+    - name: Set timezone to Stockholm
+      timezone:
+        name: Europe/Stockholm
+
+    - name: Install psycopg2 dependencies
+      ansible.builtin.apt:
+        name: python3-psycopg2
+        state: present
+
+    - name: Install libpq-dev dependencies
+      ansible.builtin.apt:
+        name: libpq-dev
+        state: present
+
+    - name: Install PostgreSQL
+      ansible.builtin.apt:
+        name: postgresql
+        state: present
+
+    - name: Allow PostgreSQL to listen on all addresses
+      ansible.builtin.lineinfile:
+        path: /etc/postgresql/10/main/postgresql.conf
+        regexp: '^#?listen_addresses'
+        line: "listen_addresses = '*'"
+      notify:
+        - Restart postgresql
+
+    - name: Create .pgpass file
+      become: true
+      become_user: postgres
+      copy:
+        content: "*:*:*:postgres:changethispassinprod123"  # Password for postgres user
+        dest: '/var/lib/postgresql/.pgpass'
+        owner: postgres
+        group: postgres
+        mode: '0600'
+
+    - name: Add pg_hba.conf entry
+      ansible.builtin.lineinfile:
+        path: /etc/postgresql/10/main/pg_hba.conf
+        line: 'host    mytest_db            test_user                 192.168.56.0/24    md5'
+        state: present
+      notify:
+        - Restart postgresql
+
+    - name: Change authentication method in pg_hba.conf
+      ansible.builtin.lineinfile:
+        path: /etc/postgresql/10/main/pg_hba.conf
+        regexp: '^local\s+all\s+postgres\s+'
+        line: 'local   all             postgres                                md5'
+      notify:
+        - Restart postgresql
+
+    - name: Create database user
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_pass }}"
+        role_attr_flags: CREATEDB
+
+    - name: Create database
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: "{{ db_name }}"
+        owner: "{{ db_user }}"
+
+    - name: Create bitcoinprices table
+      become_user: postgres
+      postgresql_query:
+        db: "{{ db_name }}"
+        query: |
+          CREATE TABLE IF NOT EXISTS bitcoinprices (
+          id SERIAL PRIMARY KEY,
+          price DECIMAL(10, 2),
+          time TIMESTAMPTZ DEFAULT NOW(),
+          timestamp TIMESTAMPTZ DEFAULT NOW());
+
+    - name: Grant permissions to the user on the table
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        db: "{{ db_name }}"
+        privs: ALL
+        type: table
+        objs: bitcoinprices
+        role: "{{ db_user }}"
+      notify:
+        - Restart postgresql
+
+    - name: Grant permissions to the user on the sequence
+      become: yes
+      become_user: postgres
+      ansible.builtin.postgresql_privs:
+        db: "{{ db_name }}"
+        privs: USAGE,SELECT
+        type: sequence
+        objs: bitcoinprices_id_seq
+        role: "{{ db_user }}"
+      notify:
+        - Restart postgresql
+
+  handlers:
+    - name: Restart postgresql
+      systemd:
+        name: postgresql
+        state: restarted
